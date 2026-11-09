@@ -45,6 +45,8 @@
         self.toolbarcolor = nil;
         self.toolbartranslucent = YES;
         self.beforeload = @"";
+        self.headers = @{};
+        self.cookies = @{};
     }
 
     return self;
@@ -71,12 +73,28 @@
             [numberFormatter setAllowsFloats:YES];
             BOOL isNumber = [numberFormatter numberFromString:value_lc] != nil;
 
+            // JSON values are base64 encoded.
+            // '=' is replaced with '@' because '=' separates option keys and values.
+            BOOL isJson = NO;
+            NSData *base64Value = [[NSData alloc] initWithBase64EncodedString:[value stringByReplacingOccurrencesOfString:@"@" withString:@"="]
+                                                                      options:NSDataBase64DecodingIgnoreUnknownCharacters];
+            NSError *error = nil;
+            id jsonValue = nil;
+            if (base64Value) {
+                jsonValue = [NSJSONSerialization JSONObjectWithData:base64Value options:0 error:&error];
+                if (!error && jsonValue) {
+                    isJson = YES;
+                }
+            }
+
             // set the property according to the key name
             if ([obj respondsToSelector:NSSelectorFromString(key)]) {
                 if (isNumber) {
                     [obj setValue:[numberFormatter numberFromString:value_lc] forKey:key];
                 } else if (isBoolean) {
                     [obj setValue:[NSNumber numberWithBool:[value_lc isEqualToString:@"yes"]] forKey:key];
+                } else if (isJson) {
+                    [obj setValue:jsonValue forKey:key];
                 } else {
                     [obj setValue:value forKey:key];
                 }

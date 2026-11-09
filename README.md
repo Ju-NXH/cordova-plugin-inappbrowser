@@ -24,6 +24,10 @@ description: Open an in-app browser window.
 #
 -->
 
+# Reason for fork
+[PR](https://github.com/apache/cordova-plugin-inappbrowser/pull/1024) for passing cookies to the InAppBrowser was already available.  
+However it is not getting merged.
+
 # cordova-plugin-inappbrowser
 
 [![npm - Latest](https://img.shields.io/npm/v/cordova-plugin-inappbrowser/latest?label=Latest%20Release%20(npm))](https://npmjs.com/package/cordova-plugin-inappbrowser)

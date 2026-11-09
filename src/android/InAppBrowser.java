@@ -35,8 +35,11 @@ import android.net.http.SslError;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.Message;
 import android.text.InputType;
+import android.util.Base64;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -82,9 +85,12 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Iterator;
 import java.util.List;
 import java.util.HashMap;
+import java.util.Map;
 import java.util.StringTokenizer;
+import java.util.concurrent.CountDownLatch;
 
 @SuppressLint("SetJavaScriptEnabled")
 public class InAppBrowser extends CordovaPlugin {
@@ -121,10 +127,12 @@ public class InAppBrowser extends CordovaPlugin {
     private static final String FOOTER_COLOR = "footercolor";
     private static final String BEFORELOAD = "beforeload";
     private static final String FULLSCREEN = "fullscreen";
+    private static final String COOKIES = "cookies";
+    private static final String HEADERS = "headers";
 
     private static final int TOOLBAR_HEIGHT = 48;
 
-    private static final List customizableOptions = Arrays.asList(CLOSE_BUTTON_CAPTION, TOOLBAR_COLOR, NAVIGATION_COLOR, CLOSE_BUTTON_COLOR, FOOTER_COLOR);
+    private static final List customizableOptions = Arrays.asList(CLOSE_BUTTON_CAPTION, TOOLBAR_COLOR, NAVIGATION_COLOR, CLOSE_BUTTON_COLOR, FOOTER_COLOR, COOKIES, HEADERS);
 
     private InAppBrowserDialog dialog;
     private WebView inAppWebView;
@@ -155,6 +163,8 @@ public class InAppBrowser extends CordovaPlugin {
     private boolean fullscreen = true;
     private String[] allowedSchemes;
     private InAppBrowserClient currentClient;
+    private Map<String, String> headers;
+    private Map<String, String> cookies;
 
     /**
      * Executes the request and returns PluginResult.
@@ -173,12 +183,15 @@ public class InAppBrowser extends CordovaPlugin {
             }
             final String target = t;
             final HashMap<String, String> features = parseFeature(args.optString(2));
+            parseHeadersAndCookies(features);
 
             LOG.d(LOG_TAG, "target = " + target);
 
             this.cordova.getActivity().runOnUiThread(new Runnable() {
                 @Override
                 public void run() {
+                    setOptionCookies();
+
                     String result = "";
                     // SELF
                     if (SELF.equals(target)) {
@@ -278,7 +291,7 @@ public class InAppBrowser extends CordovaPlugin {
                     } else {
                         ((InAppBrowserClient)inAppWebView.getWebViewClient()).waitForBeforeload = false;
                     }
-                    inAppWebView.loadUrl(url);
+                    loadInAppUrl(url);
 
                 }
             });
@@ -451,6 +464,98 @@ public class InAppBrowser extends CordovaPlugin {
                 }
             }
             return map;
+        }
+    }
+
+    /**
+     * Reads the base64-encoded JSON {@code headers} and {@code cookies} options.
+     * '=' in the base64 payload is sent as '@' because '=' separates option keys and values.
+     * Map keys are URLs. Cookie values are Set-Cookie header strings.
+     */
+    private void parseHeadersAndCookies(HashMap<String, String> features) {
+        headers = null;
+        cookies = null;
+        if (features == null) {
+            return;
+        }
+
+        String headersSet = features.get(HEADERS);
+        if (headersSet != null) {
+            headers = deserializeMapOption(headersSet);
+        }
+
+        String cookiesSet = features.get(COOKIES);
+        if (cookiesSet != null) {
+            cookies = deserializeMapOption(cookiesSet);
+        }
+    }
+
+    private Map<String, String> deserializeMapOption(String serializedMapOption) {
+        Map<String, String> result = new HashMap<String, String>();
+        try {
+            String base64 = serializedMapOption.replace("@", "=");
+            String json = new String(Base64.decode(base64, Base64.DEFAULT));
+            JSONObject jsonObject = new JSONObject(json);
+            for (Iterator<String> keys = jsonObject.keys(); keys.hasNext(); ) {
+                String key = keys.next();
+                result.put(key, jsonObject.getString(key));
+            }
+        } catch (IllegalArgumentException e) {
+            LOG.e(LOG_TAG, "headers options are not valid base64.", e);
+            return null;
+        } catch (JSONException e) {
+            LOG.e(LOG_TAG, "headers options are not serialized as a valid json.", e);
+            return null;
+        }
+        return result;
+    }
+
+    /**
+     * Sets cookies from the current open options and blocks until CookieManager finishes.
+     * The work runs on a background looper so the calling thread can wait without deadlocking
+     * the cookie callbacks.
+     */
+    private void setOptionCookies() {
+        if (cookies == null || cookies.isEmpty()) {
+            return;
+        }
+
+        final Map<String, String> cookiesToSet = cookies;
+        final CountDownLatch cookiesCountdown = new CountDownLatch(cookiesToSet.size());
+        HandlerThread handlerThread = new HandlerThread("InAppBrowserCookieThread");
+        handlerThread.start();
+        Handler threadHandler = new Handler(handlerThread.getLooper());
+        threadHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                final CookieManager cookieManager = CookieManager.getInstance();
+                for (final Map.Entry<String, String> entry : cookiesToSet.entrySet()) {
+                    cookieManager.setCookie(entry.getKey(), entry.getValue(), new ValueCallback<Boolean>() {
+                        @Override
+                        public void onReceiveValue(Boolean value) {
+                            if (value == null || !value) {
+                                LOG.e(LOG_TAG, "unable to set the cookie in CookieManager!");
+                            }
+                            cookiesCountdown.countDown();
+                        }
+                    });
+                }
+            }
+        });
+        try {
+            cookiesCountdown.await();
+        } catch (InterruptedException e) {
+            LOG.e(LOG_TAG, "cookies set was interrupted.", e);
+        }
+        CookieManager.getInstance().flush();
+        handlerThread.quitSafely();
+    }
+
+    private void loadInAppUrl(String url) {
+        if (headers != null) {
+            inAppWebView.loadUrl(url, headers);
+        } else {
+            inAppWebView.loadUrl(url);
         }
     }
 
@@ -754,22 +859,20 @@ public class InAppBrowser extends CordovaPlugin {
             private void clearCookies(final Runnable completion) {
                 final CookieManager cookieManager = CookieManager.getInstance();
 
+                ValueCallback<Boolean> cleared = new ValueCallback<Boolean>() {
+                    @Override
+                    public void onReceiveValue(Boolean value) {
+                        cookieManager.flush();
+                        // Clearing runs after the cookies from this open were applied.
+                        setOptionCookies();
+                        completion.run();
+                    }
+                };
+
                 if (clearAllCache) {
-                    cookieManager.removeAllCookies(new ValueCallback<Boolean>() {
-                        @Override
-                        public void onReceiveValue(Boolean value) {
-                            cookieManager.flush();
-                            completion.run();
-                        }
-                    });
+                    cookieManager.removeAllCookies(cleared);
                 } else if (clearSessionCache) {
-                    cookieManager.removeSessionCookies(new ValueCallback<Boolean>() {
-                        @Override
-                        public void onReceiveValue(Boolean value) {
-                            cookieManager.flush();
-                            completion.run();
-                        }
-                    });
+                    cookieManager.removeSessionCookies(cleared);
                 } else {
                     completion.run();
                 }
@@ -1127,7 +1230,7 @@ public class InAppBrowser extends CordovaPlugin {
                 clearCookies(new Runnable() {
                     @Override
                     public void run() {
-                        inAppWebView.loadUrl(url);
+                        loadInAppUrl(url);
                     }
                 });
                 inAppWebView.setId(Integer.valueOf(6));

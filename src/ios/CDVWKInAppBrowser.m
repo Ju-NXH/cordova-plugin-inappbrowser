@@ -194,7 +194,8 @@ static UIBarButtonSystemItem CDVWKInAppBrowserCloseButtonSystemItem(void)
             return;
         }
 
-        [strongSelf.inAppBrowserViewController navigateTo:url];
+        [strongSelf setCookiesFromOptions:browserOptions];
+        [strongSelf.inAppBrowserViewController navigateTo:url options:browserOptions];
         if (!browserOptions.hidden) {
             [strongSelf show:nil withNoAnimate:browserOptions.hidden];
         }
@@ -236,6 +237,32 @@ static UIBarButtonSystemItem CDVWKInAppBrowserCloseButtonSystemItem(void)
 
     if (completionHandler != nil) {
         completionHandler();
+    }
+}
+
+/**
+ * Applies cookies from the open options. Keys are URLs and values are Set-Cookie header strings.
+ * setCookie completion handlers are not awaited: they can run after the WKWebView has already loaded.
+ */
+- (void)setCookiesFromOptions:(CDVInAppBrowserOptions *)browserOptions
+{
+    WKWebsiteDataStore *dataStore = [WKWebsiteDataStore defaultDataStore];
+    WKHTTPCookieStore *cookieStore = dataStore.httpCookieStore;
+    for (NSString *key in browserOptions.cookies) {
+        NSURL *cookieURL = [NSURL URLWithString:key];
+        if (!cookieURL) {
+            NSLog(@"Cookie key %@ is not a proper NSURL!", key);
+            continue;
+        }
+
+        NSArray<NSHTTPCookie *> *parsedCookies = [NSHTTPCookie cookiesWithResponseHeaderFields:@{ @"Set-Cookie" : browserOptions.cookies[key] } forURL:cookieURL];
+        if (parsedCookies.count == 0) {
+            NSLog(@"No cookies to process for url %@!", cookieURL);
+        }
+
+        for (NSHTTPCookie *cookie in parsedCookies) {
+            [cookieStore setCookie:cookie completionHandler:nil];
+        }
     }
 }
 
@@ -427,7 +454,7 @@ static UIBarButtonSystemItem CDVWKInAppBrowserCloseButtonSystemItem(void)
 
     NSURL *url = [NSURL URLWithString:urlStr];
     _waitForBeforeload = NO;
-    [self.inAppBrowserViewController navigateTo:url];
+    [self.inAppBrowserViewController navigateTo:url options:nil];
 }
 
 - (BOOL)isBeforeloadEnabled
@@ -1209,12 +1236,16 @@ BOOL isExiting = NO;
     });
 }
 
-- (void)navigateTo:(NSURL *)url
+- (void)navigateTo:(NSURL *)url options:(CDVInAppBrowserOptions *)options
 {
     if ([url.scheme isEqualToString:@"file"]) {
         [self.webView loadFileURL:url allowingReadAccessToURL:url];
     } else {
-        NSURLRequest *request = [NSURLRequest requestWithURL:url];
+        NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+        for (NSString *key in options.headers) {
+            NSString *value = options.headers[key];
+            [request setValue:value forHTTPHeaderField:key];
+        }
         [self.webView loadRequest:request];
     }
 }
